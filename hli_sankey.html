@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>HLI Financial Flows</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.8.5/d3.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/d3-sankey/0.12.3/d3-sankey.min.js"></script>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@300;400;500&family=DM+Sans:wght@300;400;500;600&display=swap');
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: #0e1117;
+    font-family: 'DM Sans', sans-serif;
+    color: #e8e8e8;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 32px 24px;
+  }
+
+  .header {
+    text-align: center;
+    margin-bottom: 28px;
+    width: 100%;
+    max-width: 960px;
+  }
+
+  .header h1 {
+    font-family: 'DM Sans', sans-serif;
+    font-weight: 600;
+    font-size: 1.25rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: #c8c8c8;
+  }
+
+  .header p {
+    font-family: 'DM Mono', monospace;
+    font-size: 0.7rem;
+    color: #555;
+    margin-top: 6px;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+
+  #chart {
+    width: 100%;
+    max-width: 960px;
+  }
+
+  svg {
+    width: 100%;
+    height: auto;
+    overflow: visible;
+  }
+
+  .link {
+    fill: none;
+    stroke-opacity: 0.18;
+    transition: stroke-opacity 0.2s ease;
+  }
+
+  .link:hover { stroke-opacity: 0.45; }
+
+  .tooltip {
+    position: fixed;
+    background: #1a1e26;
+    border: 1px solid #2a2e38;
+    border-radius: 6px;
+    padding: 10px 14px;
+    font-family: 'DM Sans', sans-serif;
+    font-size: 12px;
+    color: #d4d4d4;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.15s ease;
+    z-index: 100;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.4);
+  }
+
+  .tooltip .tt-route { font-weight: 600; margin-bottom: 4px; color: #fff; }
+  .tooltip .tt-value { font-family: 'DM Mono', monospace; font-size: 11px; color: #aaa; }
+  .tooltip .tt-pct   { font-size: 11px; color: #666; margin-top: 2px; }
+
+  #status {
+    font-family: 'DM Mono', monospace;
+    font-size: 0.72rem;
+    color: #444;
+    text-align: center;
+    margin-top: 20px;
+    letter-spacing: 0.04em;
+  }
+
+  #status.error { color: #c0614a; }
+
+  .divider {
+    width: 100%;
+    max-width: 960px;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, #2a2e38, transparent);
+    margin: 24px 0 0;
+  }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>Happier Lives Institute — Financial Flows</h1>
+  <p id="subtitle">Loading data…</p>
+</div>
+
+<div id="chart"></div>
+<div class="divider"></div>
+<div id="status"></div>
+<div class="tooltip" id="tooltip"></div>
+
+<script>
+const CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vQazRi1M0tAt4JSGP8jenEp51729pgLj7OfMPyzijhqDUBMP15QqL4ejMGkiuQ6gaVtOuPkFI0RKs_-/pub?gid=1401606733&single=true&output=csv";
+
+const NODE_COLOURS = {
+  "Gross Donations":    "#4a7fa5",
+  "Gift Aid":           "#3d6b8a",
+  "Total Raised":       "#6a8fa0",
+  "Charities":          "#7ab39e",
+  "HLI":                "#c8a96e",
+  "Fees":               "#8a7a6a",
+  "Happier Lives Fund": "#9ab87a",
+  "StrongMinds":        "#b87a8a",
+  "Friendship Bench":   "#7a8ab8",
+  "Pure Earth":         "#a87ab8",
+  "Taimaka":            "#7ab8b0",
+};
+
+const FALLBACK_COLOURS = [
+  "#7ab39e","#b87a8a","#7a8ab8","#a87ab8","#c8a96e",
+  "#9ab87a","#6a8fa0","#8a7a6a","#7ab8b0","#b8a07a",
+];
+
+const fmt = v => "$" + d3.format(",.0f")(v);
+const getColour = (name, i) => NODE_COLOURS[name] || FALLBACK_COLOURS[i % FALLBACK_COLOURS.length];
+
+function parseCSV(text) {
+  const rows = d3.csvParseRows(text);
+  const links = [];
+  for (let i = 1; i < rows.length; i++) {
+    const [from, to, valueRaw] = rows[i];
+    if (!from || !to || !valueRaw) continue;
+    const value = parseFloat(String(valueRaw).replace(/[$,\s]/g, ""));
+    if (!isNaN(value) && value > 0) {
+      links.push({ source: from.trim(), target: to.trim(), value });
+    }
+  }
+  return links;
+}
+
+function render(rawLinks) {
+  const nodeNames = [];
+  const seen = new Set();
+  rawLinks.forEach(l => {
+    [l.source, l.target].forEach(name => {
+      if (!seen.has(name)) { seen.add(name); nodeNames.push(name); }
+    });
+  });
+
+  const nodeIndex = Object.fromEntries(nodeNames.map((n, i) => [n, i]));
+  const nodes = nodeNames.map((id, i) => ({ id, index: i, colour: getColour(id, i) }));
+  const links = rawLinks.map(l => ({
+    source:    nodeIndex[l.source],
+    target:    nodeIndex[l.target],
+    value:     l.value,
+    _sourceId: l.source,
+    _targetId: l.target,
+  }));
+
+  const hasIncoming = new Set(links.map(l => l.target));
+  const total = d3.sum(links.filter(l => !hasIncoming.has(l.source)), l => l.value);
+  const pct = v => d3.format(".1f")(v * 100 / total) + "%";
+
+  const W = 960, H = 480;
+  const margin = { top: 20, right: 160, bottom: 20, left: 150 };
+
+  d3.select("#chart").selectAll("*").remove();
+
+  const svg = d3.select("#chart")
+    .append("svg")
+    .attr("viewBox", `0 0 ${W} ${H}`)
+    .attr("preserveAspectRatio", "xMidYMid meet");
+
+  const sankeyGen = d3.sankey()
+    .nodeId(d => d.index)
+    .nodeWidth(10)
+    .nodePadding(18)
+    .extent([[margin.left, margin.top], [W - margin.right, H - margin.bottom]])
+    .nodeSort(null);
+
+  const graph = sankeyGen({
+    nodes: nodes.map(d => ({ ...d })),
+    links: links.map(d => ({ ...d })),
+  });
+
+  const tooltip = document.getElementById("tooltip");
+
+  svg.append("g")
+    .selectAll("path")
+    .data(graph.links)
+    .join("path")
+    .attr("class", "link")
+    .attr("d", d3.sankeyLinkHorizontal())
+    .attr("stroke", d => {
+      const src = typeof d.source === "object" ? d.source.index : d.source;
+      return nodes[src]?.colour || "#888";
+    })
+    .attr("stroke-width", d => Math.max(1, d.width))
+    .on("mousemove", (event, d) => {
+      tooltip.style.opacity = "1";
+      tooltip.style.left = (event.clientX + 14) + "px";
+      tooltip.style.top  = (event.clientY - 36) + "px";
+      tooltip.innerHTML = `
+        <div class="tt-route">${d._sourceId} → ${d._targetId}</div>
+        <div class="tt-value">${fmt(d.value)}</div>
+        <div class="tt-pct">${pct(d.value)} of total</div>
+      `;
+    })
+    .on("mouseleave", () => { tooltip.style.opacity = "0"; });
+
+  const node = svg.append("g")
+    .selectAll("g")
+    .data(graph.nodes)
+    .join("g")
+    .attr("transform", d => `translate(${d.x0},${d.y0})`);
+
+  node.append("rect")
+    .attr("height", d => Math.max(1, d.y1 - d.y0))
+    .attr("width",  d => d.x1 - d.x0)
+    .attr("fill",   d => d.colour || "#888")
+    .attr("opacity", 0.9);
+
+  const isLeft = d => d.x0 < W / 2;
+
+  node.append("text")
+    .attr("x",           d => isLeft(d) ? -8 : (d.x1 - d.x0) + 8)
+    .attr("y",           d => (d.y1 - d.y0) / 2)
+    .attr("dy",          "-0.15em")
+    .attr("text-anchor", d => isLeft(d) ? "end" : "start")
+    .text(d => d.id)
+    .style("font-size",   "12px")
+    .style("font-family", "'DM Sans', sans-serif")
+    .style("font-weight", "500")
+    .style("fill",        "#d4d4d4");
+
+  node.append("text")
+    .attr("x",           d => isLeft(d) ? -8 : (d.x1 - d.x0) + 8)
+    .attr("y",           d => (d.y1 - d.y0) / 2)
+    .attr("dy",          "1em")
+    .attr("text-anchor", d => isLeft(d) ? "end" : "start")
+    .text(d => fmt(d.value))
+    .style("font-size",   "10px")
+    .style("font-family", "'DM Mono', monospace")
+    .style("font-weight", "300")
+    .style("fill",        "#666");
+}
+
+fetch(CSV_URL)
+  .then(r => {
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    return r.text();
+  })
+  .then(text => {
+    const links = parseCSV(text);
+    if (links.length === 0) throw new Error("No data rows found — check the published CSV URL");
+    render(links);
+    document.getElementById("subtitle").textContent =
+      `All figures in USD · Loaded ${new Date().toLocaleDateString("en-GB", { day: "numeric", month: "long", year: "numeric" })}`;
+    document.getElementById("status").textContent =
+      `Live · ${links.length} flows · Source: Google Sheets`;
+  })
+  .catch(err => {
+    document.getElementById("subtitle").textContent = "Error loading data";
+    const s = document.getElementById("status");
+    s.className = "error";
+    s.textContent = `Could not load data: ${err.message}`;
+  });
+</script>
+</body>
+</html>
